@@ -161,6 +161,14 @@ if [[ "${1:-}" == "--debug" ]]; then DEBUG=1; shift; fi
 need(){ command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"; }
 need git; need curl
 
+# --- preload env so gitx works immediately after install (even without new shell) ---
+if [[ -z "${GITX_GH_USER:-}" || -z "${GITHUB_TOKEN:-}" ]]; then
+  if [[ -f "${HOME}/.config/gitx/.env" ]]; then
+    # shellcheck disable=SC1090
+    source "${HOME}/.config/gitx/.env"
+  fi
+fi
+
 # Always wire non-interactive auth
 export GIT_TERMINAL_PROMPT=0
 export GIT_ASKPASS="${HOME}/.config/gitx/askpass.sh"
@@ -307,6 +315,6 @@ main(){
   configure_git_identity
   configure_github_auth
   write_gitx
-  info "Done. Open a new shell or 'source' your rc to ensure env is loaded."
+  info "Done. You can use 'gitx' right away."
 }
 main "$@"
