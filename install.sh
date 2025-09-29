@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # install.sh — user-local installer for `gitx` (publish | push | pull)
-# Non-interactive after install: sets up AskPass using validated PAT.
 set -euo pipefail
 
 # ---------- Paths ----------
@@ -32,11 +31,6 @@ _read_from_tty(){
     read -r -p "${prompt}${def:+ [${def}]}: " ans || true
   fi
   printf "%s" "${ans:-$def}"
-}
-
-yesno(){
-  local q="${1:-}" def="${2:-Y}" d="[Y/n]"; [[ "$def" =~ ^[Nn]$ ]] && d="[y/N]"
-  local a; a="$(_read_from_tty "${q} ${d}")"; a="${a:-$def}"; [[ "$a" =~ ^[Yy]$ ]]
 }
 
 # ---------- PATH wiring ----------
@@ -80,28 +74,6 @@ validate_github_token(){
   printf "%s" "$login"
 }
 
-persist_env(){
-  local user="$1" token="$2"
-  mkdir -p "$GITX_CFG_DIR"
-  # bash/zsh
-  { echo "# gitx environment"; echo "export GITX_GH_USER=\"$user\""; echo "export GITHUB_TOKEN=\"$token\""; } > "$GITX_ENV_FILE"
-  # fish
-  { echo "# gitx environment (fish)"; echo "set -gx GITX_GH_USER \"$user\""; echo "set -gx GITHUB_TOKEN \"$token\""; } > "$GITX_ENV_FISH"
-  ok "Wrote ${GITX_ENV_FILE} and ${GITX_ENV_FISH}"
-  case "${SHELL##*/}" in
-    bash) RC_FILES=(~/.bashrc ~/.bash_profile ~/.profile) ;;
-    zsh)  RC_FILES=(~/.zshrc ~/.zprofile ~/.zshenv) ;;
-    fish) RC_FILES=(~/.config/fish/config.fish) ;;
-    *)    RC_FILES=(~/.profile) ;;
-  esac
-  for rc in "${RC_FILES[@]}"; do
-    case "$rc" in
-      *fish*) mkdir -p "$(dirname "$rc")"; grep -q 'source ~/.config/gitx/.env.fish' "$rc" 2>/dev/null || echo 'source ~/.config/gitx/.env.fish' >> "$rc" ;;
-      *)      touch "$rc"; grep -q 'source ~/.config/gitx/.env' "$rc" 2>/dev/null       || echo 'source ~/.config/gitx/.env'       >> "$rc" ;;
-    esac
-  done
-}
-
 write_askpass(){
   mkdir -p "$GITX_CFG_DIR"
   cat >"$GITX_ASKPASS" <<'APS'
@@ -115,6 +87,41 @@ esac
 APS
   chmod +x "$GITX_ASKPASS"
   ok "Wrote AskPass helper -> $GITX_ASKPASS"
+}
+
+persist_env(){
+  local user="$1" token="$2"
+  mkdir -p "$GITX_CFG_DIR"
+  # bash/zsh style .env (everything in one place)
+  {
+    echo "# gitx environment"
+    echo "export GITX_ENV_FILE=\"$GITX_ENV_FILE\""
+    echo "export GITX_GH_USER=\"$user\""
+    echo "export GITHUB_TOKEN=\"$token\""
+    echo "export GITX_ASKPASS=\"$GITX_ASKPASS\""
+  } > "$GITX_ENV_FILE"
+  # fish style (kept for users who prefer sourcing in fish)
+  {
+    echo "# gitx environment (fish)"
+    echo "set -gx GITX_ENV_FILE \"$GITX_ENV_FILE\""
+    echo "set -gx GITX_GH_USER \"$user\""
+    echo "set -gx GITHUB_TOKEN \"$token\""
+    echo "set -gx GITX_ASKPASS \"$GITX_ASKPASS\""
+  } > "$GITX_ENV_FISH"
+  ok "Wrote ${GITX_ENV_FILE} and ${GITX_ENV_FISH}"
+
+  case "${SHELL##*/}" in
+    bash) RC_FILES=(~/.bashrc ~/.bash_profile ~/.profile) ;;
+    zsh)  RC_FILES=(~/.zshrc ~/.zprofile ~/.zshenv) ;;
+    fish) RC_FILES=(~/.config/fish/config.fish) ;;
+    *)    RC_FILES=(~/.profile) ;;
+  esac
+  for rc in "${RC_FILES[@]}"; do
+    case "$rc" in
+      *fish*) mkdir -p "$(dirname "$rc")"; grep -q 'source ~/.config/gitx/.env.fish' "$rc" 2>/dev/null || echo 'source ~/.config/gitx/.env.fish' >> "$rc" ;;
+      *)      touch "$rc"; grep -q 'source ~/.config/gitx/.env' "$rc" 2>/dev/null       || echo 'source ~/.config/gitx/.env'       >> "$rc" ;;
+    esac
+  done
 }
 
 configure_github_auth(){
@@ -134,8 +141,8 @@ configure_github_auth(){
     [[ -n "$token" ]] || err "GITHUB_TOKEN cannot be empty."
   done
   ok "Authenticated with GitHub as '${login}'."
-  persist_env "$login" "$token"
   write_askpass
+  persist_env "$login" "$token"
 }
 
 # ---------- Install CLI ----------
@@ -161,17 +168,28 @@ if [[ "${1:-}" == "--debug" ]]; then DEBUG=1; shift; fi
 need(){ command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"; }
 need git; need curl
 
-# --- preload env so gitx works immediately after install (even without new shell) ---
+# --- Always load env from ~/.config/gitx/.env so it works immediately after install ---
+if [[ -f "${HOME}/.config/gitx/.env" ]]; then
+  # shellcheck disable=SC1090
+  source "${HOME}/.config/gitx/.env"
+fi
+# Fallback: try to read fish env if bash env missing
 if [[ -z "${GITX_GH_USER:-}" || -z "${GITHUB_TOKEN:-}" ]]; then
-  if [[ -f "${HOME}/.config/gitx/.env" ]]; then
-    # shellcheck disable=SC1090
-    source "${HOME}/.config/gitx/.env"
+  if [[ -f "${HOME}/.config/gitx/.env.fish" ]]; then
+    # Extract values from fish format
+    while IFS= read -r line; do
+      case "$line" in
+        set\ -gx\ GITX_GH_USER\ *)   export GITX_GH_USER="${line#*GITX_GH_USER }"; GITX_GH_USER="${GITX_GH_USER%\"}"; GITX_GH_USER="${GITX_GH_USER#\"}";;
+        set\ -gx\ GITHUB_TOKEN\ *)   export GITHUB_TOKEN="${line#*GITHUB_TOKEN }"; GITHUB_TOKEN="${GITHUB_TOKEN%\"}"; GITHUB_TOKEN="${GITHUB_TOKEN#\"}";;
+        set\ -gx\ GITX_ASKPASS\ *)   export GITX_ASKPASS="${line#*GITX_ASKPASS }"; GITX_ASKPASS="${GITX_ASKPASS%\"}"; GITX_ASKPASS="${GITX_ASKPASS#\"}";;
+      esac
+    done < "${HOME}/.config/gitx/.env.fish"
   fi
 fi
 
 # Always wire non-interactive auth
 export GIT_TERMINAL_PROMPT=0
-export GIT_ASKPASS="${HOME}/.config/gitx/askpass.sh"
+export GIT_ASKPASS="${GITX_ASKPASS:-${HOME}/.config/gitx/askpass.sh}"
 
 DEFAULT_BRANCH="${GITX_DEFAULT_BRANCH:-main}"
 REMOTE_NAME="origin"
