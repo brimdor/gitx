@@ -19,7 +19,7 @@ err(){  printf "%s\n" "${RED}✖${NC} $*" 1>&2; }
 die(){  err "$*"; exit 1; }
 require_cmd(){ command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"; }
 
-# ---------- robust prompts (work with curl | bash) ----------
+# ---------- robust prompts (works with curl | bash) ----------
 _read_from_tty(){
   local silent=0 prompt def ans
   if [[ "${1:-}" == "-s" ]]; then silent=1; shift; fi
@@ -68,7 +68,7 @@ configure_git_identity(){
 # ---------- Token handling ----------
 validate_github_token(){
   local tok="$1" resp login
-  resp="$(curl -fsSL -H "Authorization: Bearer ${tok}" https://api.github.com/user || true)"
+  resp="$(curl -sS -H "Authorization: Bearer ${tok}" https://api.github.com/user || true)"
   login="$(printf "%s" "$resp" | sed -n 's/^[[:space:]]*"login":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
   [[ -n "$login" ]] || return 1
   printf "%s" "$login"
@@ -92,7 +92,7 @@ APS
 persist_env(){
   local user="$1" token="$2"
   mkdir -p "$GITX_CFG_DIR"
-  # bash/zsh style .env (everything in one place)
+  # single source of truth
   {
     echo "# gitx environment"
     echo "export GITX_ENV_FILE=\"$GITX_ENV_FILE\""
@@ -100,7 +100,6 @@ persist_env(){
     echo "export GITHUB_TOKEN=\"$token\""
     echo "export GITX_ASKPASS=\"$GITX_ASKPASS\""
   } > "$GITX_ENV_FILE"
-  # fish style (kept for users who prefer sourcing in fish)
   {
     echo "# gitx environment (fish)"
     echo "set -gx GITX_ENV_FILE \"$GITX_ENV_FILE\""
@@ -176,12 +175,11 @@ fi
 # Fallback: try to read fish env if bash env missing
 if [[ -z "${GITX_GH_USER:-}" || -z "${GITHUB_TOKEN:-}" ]]; then
   if [[ -f "${HOME}/.config/gitx/.env.fish" ]]; then
-    # Extract values from fish format
     while IFS= read -r line; do
       case "$line" in
-        set\ -gx\ GITX_GH_USER\ *)   export GITX_GH_USER="${line#*GITX_GH_USER }"; GITX_GH_USER="${GITX_GH_USER%\"}"; GITX_GH_USER="${GITX_GH_USER#\"}";;
-        set\ -gx\ GITHUB_TOKEN\ *)   export GITHUB_TOKEN="${line#*GITHUB_TOKEN }"; GITHUB_TOKEN="${GITHUB_TOKEN%\"}"; GITHUB_TOKEN="${GITHUB_TOKEN#\"}";;
-        set\ -gx\ GITX_ASKPASS\ *)   export GITX_ASKPASS="${line#*GITX_ASKPASS }"; GITX_ASKPASS="${GITX_ASKPASS%\"}"; GITX_ASKPASS="${GITX_ASKPASS#\"}";;
+        set\ -gx\ GITX_GH_USER\ *)   val="${line#*GITX_GH_USER }"; val="${val%\"}"; val="${val#\"}"; export GITX_GH_USER="$val";;
+        set\ -gx\ GITHUB_TOKEN\ *)   val="${line#*GITHUB_TOKEN }"; val="${val%\"}"; val="${val#\"}"; export GITHUB_TOKEN="$val";;
+        set\ -gx\ GITX_ASKPASS\ *)   val="${line#*GITX_ASKPASS }"; val="${val%\"}"; val="${val#\"}"; export GITX_ASKPASS="$val";;
       esac
     done < "${HOME}/.config/gitx/.env.fish"
   fi
@@ -223,19 +221,29 @@ require_identities(){
 }
 
 gh_repo_exists(){
-  local user="$1" repo="$2"
-  curl -fsS -o /dev/null -w "%{http_code}" \
+  # safe arg handling (works with set -u)
+  local user="${1-}"; local repo="${2-}"
+  [[ -n "${user:-}" ]] || user="${GITX_GH_USER:-}"
+  [[ -n "${repo:-}" ]] || repo="${CURRENT_DIR:-${PWD##*/}}"
+  [[ -n "${user:-}" && -n "${repo:-}" ]] || die "internal error: gh_repo_exists missing user/repo"
+  local code
+  code="$(curl -sS -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-    "https://api.github.com/repos/${user}/${repo}" | grep -q '^200$'
+    "https://api.github.com/repos/${user}/${repo}" 2>/dev/null || true)"
+  [[ "$code" == "200" ]]
 }
 
 gh_create_repo(){
-  local user="$1" repo="$2" private="${3:-false}" status
-  status="$(curl -fsS -o /dev/null -w "%{http_code}" \
+  local user="${1-}"; local repo="${2-}"; local private="${3:-false}"
+  [[ -n "${user:-}" ]] || user="${GITX_GH_USER:-}"
+  [[ -n "${repo:-}" ]] || repo="${CURRENT_DIR:-${PWD##*/}}"
+  [[ -n "${user:-}" && -n "${repo:-}" ]] || die "internal error: gh_create_repo missing user/repo"
+  local status
+  status="$(curl -sS -o /dev/null -w "%{http_code}" \
     -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     -H "Content-Type: application/json" \
     -d "{\"name\":\"${repo}\",\"private\":${private}}" \
-    https://api.github.com/user/repos || true)"
+    https://api.github.com/user/repos 2>/dev/null || true)"
   case "$status" in
     201) ok "GitHub repo created: ${user}/${repo}";;
     422) info "Repo already exists on GitHub: ${user}/${repo}";;
@@ -244,7 +252,12 @@ gh_create_repo(){
 }
 
 ensure_remote(){
-  local user="$1" repo="$2" url="https://github.com/${user}/${repo}.git"
+  local user="${1-}"; local repo="${2-}"
+  [[ -n "${user:-}" ]] || user="${GITX_GH_USER:-}"
+  [[ -n "${repo:-}" ]] || repo="${CURRENT_DIR:-${PWD##*/}}"
+  [[ -n "${user:-}" && -n "${repo:-}" ]] || die "internal error: ensure_remote missing user/repo"
+
+  local url="https://github.com/${user}/${repo}.git"
   if remote_exists; then
     local cur; cur="$(git remote get-url "$REMOTE_NAME")"
     [[ "$cur" == "$url" ]] || { info "Updating remote '$REMOTE_NAME' -> $url"; git remote set-url "$REMOTE_NAME" "$url"; }
