@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # uninstall.sh — safely remove the `gitx` CLI
-# Default behavior:
+# Default:
 #   • Remove ~/.local/bin/gitx
 #   • Leave your shell rc files alone
 #
-# Optional flags:
-#   --purge  Remove PATH lines the installer added (bash/zsh/fish)
+# Flags:
+#   --purge  Also remove PATH lines added by installer + 'source ~/.config/gitx/.env'
 #   --debug  Verbose tracing
 #   --help   Show help
 
@@ -34,10 +34,8 @@ USAGE:
   ./uninstall.sh [--purge] [--debug]
 
 OPTIONS:
-  --purge   Also remove PATH lines the installer added to your shell rc files.
-            (bash: ~/.bashrc ~/.bash_profile ~/.profile)
-            (zsh:  ~/.zshrc ~/.zprofile ~/.zshenv)
-            (fish: ~/.config/fish/config.fish)
+  --purge   Also remove PATH lines the installer added to your shell rc files
+            and any 'source ~/.config/gitx/.env' lines (bash/zsh/fish).
   --debug   Enable verbose tracing.
   --help    Show this help.
 HLP
@@ -50,6 +48,8 @@ done
 
 GITX_BIN="$HOME/.local/bin/gitx"
 LOCAL_BIN_DIR="$HOME/.local/bin"
+GITX_ENV_FILE="$HOME/.config/gitx/.env"
+GITX_CFG_DIR="$HOME/.config/gitx"
 
 remove_gitx() {
   if [[ -f "$GITX_BIN" ]]; then
@@ -61,8 +61,7 @@ remove_gitx() {
 }
 
 purge_path_lines() {
-  # Only run when explicitly asked; removing PATH lines can affect other tools.
-  info "Purging PATH lines added by the installer…"
+  info "Purging PATH and env sourcing lines added by the installer…"
 
   case "${SHELL##*/}" in
     bash) RC_FILES=(~/.bashrc ~/.bash_profile ~/.profile) ;;
@@ -75,33 +74,56 @@ purge_path_lines() {
     [[ -f "$rc" ]] || continue
     tmp="${rc}.gitx-uninstall.tmp"
 
-    # Remove exact lines we added in the installer
     if [[ "$rc" == *"config/fish/config.fish" ]]; then
-      # fish syntax
-      sed '/^[[:space:]]*set[[:space:]]\+-gx[[:space:]]\+PATH[[:space:]]\+~\/\.local\/bin[[:space:]]\+\$PATH[[:space:]]*$/d' "$rc" > "$tmp" || true
+      # Remove fish PATH line and env source line
+      sed -e '/^[[:space:]]*set[[:space:]]\+-gx[[:space:]]\+PATH[[:space:]]\+~\/\.local\/bin[[:space:]]\+\$PATH[[:space:]]*$/d' \
+          -e '/^[[:space:]]*source[[:space:]]\+~\/\.config\/gitx\/\.env[[:space:]]*$/d' \
+          "$rc" > "$tmp" || true
     else
-      # bash/zsh/profile syntax
-      sed '/^[[:space:]]*export[[:space:]]\+PATH="\$HOME\/\.local\/bin:\$PATH"[[:space:]]*$/d' "$rc" > "$tmp" || true
+      # Remove bash/zsh PATH line and env source line
+      sed -e '/^[[:space:]]*export[[:space:]]\+PATH="\$HOME\/\.local\/bin:\$PATH"[[:space:]]*$/d' \
+          -e '/^[[:space:]]*source[[:space:]]\+~\/\.config\/gitx\/\.env[[:space:]]*$/d' \
+          "$rc" > "$tmp" || true
     fi
 
     if ! cmp -s "$rc" "$tmp"; then
       mv "$tmp" "$rc"
-      ok "Cleaned PATH line from $(basename "$rc")"
+      ok "Cleaned entries in $(basename "$rc")"
     else
       rm -f "$tmp"
-      info "No matching PATH line in $(basename "$rc")"
+      info "No matching entries in $(basename "$rc")"
     fi
   done
 
-  # If running in a sourced context, try to update the current session PATH minimally.
+  # Remove env file and possibly the directory
+  if [[ -f "$GITX_ENV_FILE" ]]; then
+    rm -f "$GITX_ENV_FILE"
+    ok "Removed $GITX_ENV_FILE"
+  fi
+  if [[ -d "$GITX_CFG_DIR" ]]; then
+    rmdir "$GITX_CFG_DIR" 2>/dev/null && ok "Removed empty $GITX_CFG_DIR" || true
+  fi
+
+  # If running in a sourced context, update PATH in the current session.
   if [[ "${BASH_SOURCE[0]:-}" != "$0" || "${ZSH_EVAL_CONTEXT:-}" == *:file ]]; then
     case "${SHELL##*/}" in
-      fish) functions -q set >/dev/null 2>&1 || true ;; # nothing to do reliably here
-      *)    export PATH="$(printf %s "$PATH" | awk -v RS=: -v ORS=: '$0!="'$HOME'/.local/bin"' {print}' | sed 's/:$//')" ;;
+      fish)
+        # Best-effort: remove ~/.local/bin from current PATH (fish syntax varies per session)
+        # Users can restart fish to fully refresh.
+        true
+        ;;
+      *)
+        # Safe, quote-proof PATH filter:
+        # Rebuild PATH excluding $HOME/.local/bin
+        P_REMOVE="$HOME/.local/bin"
+        NEWPATH="$(awk -v RS=: -v ORS=: -v P="$P_REMOVE" 'NF && $0!=P {printf "%s", $0 ORS}' <<<"$PATH")"
+        NEWPATH="${NEWPATH%:}"
+        export PATH="$NEWPATH"
+        ok "PATH updated for current session."
+        ;;
     esac
-    ok "PATH updated for current session."
   else
-    info "Restart your shell or 'source' your rc file to refresh PATH."
+    info "Restart your shell or 'source' your rc file(s) to refresh PATH."
   fi
 }
 
@@ -121,7 +143,7 @@ main() {
     purge_path_lines
     maybe_remove_empty_dir
   else
-    info "Kept your PATH configuration. Use --purge to remove installer-added PATH lines."
+    info "Kept your PATH configuration. Use --purge to remove installer-added PATH and env sourcing lines."
   fi
   ok "Uninstall complete."
 }
